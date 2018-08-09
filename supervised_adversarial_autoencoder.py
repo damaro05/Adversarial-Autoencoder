@@ -50,12 +50,14 @@ def form_results():
     tensorboard_path = results_path + folder_name + '/Tensorboard'
     saved_model_path = results_path + folder_name + '/Saved_models/'
     log_path = results_path + folder_name + '/log'
+    other_results = results_path + folder_name + '/others'
     if not os.path.exists(results_path + folder_name):
         os.mkdir(results_path + folder_name)
         os.mkdir(tensorboard_path)
         os.mkdir(saved_model_path)
         os.mkdir(log_path)
-    return tensorboard_path, saved_model_path, log_path
+        os.mkdir(other_results)
+    return tensorboard_path, saved_model_path, log_path, other_results
 
 
 def generate_image_grid(sess, op):
@@ -124,20 +126,32 @@ def generate_image_grid(sess, op):
     plt.show()
 
 def generate_image_grid_gmm(sess, op):
-    nx, ny = 10, 10
+    nx, ny = z_dim, n_labels
     # Training Gaussian Mixture Model
-    gmm = train_gaussian_mixture(z_dim, 1000)
+    gmm = train_gaussian_mixture(n_labels, z_dim, 1000)
     # Generate random vector of each Gaussian 
     # random_inputs = gmm.sample(n_samples=z_dim)[0]
     random_inputs = np.identity(z_dim)
     print('Random input ' + str(random_inputs))
     print(random_inputs.shape)
     # Generate image for each class 
-    sample_y = np.identity(z_dim)
+    sample_y = np.identity(n_labels)
     print('sample y ' + str(sample_y))
     print(sample_y.shape)
 
     plt.subplot()
+
+    if z_dim > 10:
+        nx, ny = 10, n_labels
+        temp = random_inputs[range(0, z_dim, 10)]
+        # temp2 = sample_y[range(0, z_dim, 10)]
+        print('temporal y ' + str(temp))
+        print(temp.shape)
+        # print('temporal2 y ' + str(temp2))
+        # print(temp2.shape)
+        random_inputs = temp
+        # sample_y = temp2
+
     # gs = gridspec.GridSpec(nx, ny, hspace=0.05, wspace=0.05)
     gs = gridspec.GridSpec(nx, ny)
 
@@ -160,7 +174,6 @@ def generate_image_grid_gmm(sess, op):
     plt.show()
 
 
-
 def generate_decode_output(sess, op):
 
     input_value = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0, 0])
@@ -178,6 +191,29 @@ def generate_decode_output(sess, op):
     plt.imshow(img, cmap='gray')
 
     plt.show()
+
+def save_confusion_matrix(classes_sz, conf_values, filename, num_samples):
+    classes = np.arange(classes_sz)
+    cmap = plt.cm.Blues
+    plt.figure()
+
+    plt.imshow(conf_values, interpolation='nearest', cmap=cmap)
+    plt.title('Confusion Matrix of ' + str(num_samples) + ' samples')
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+
+    fmt = 'd'
+    thresh = conf_values.max() / 2.
+    for i, j in itertools.product(range(conf_values.shape[0]), range(conf_values.shape[1])):
+        plt.text(j, i, format(conf_values[i, j], fmt), horizontalalignment="center", color="white" if conf_values[i, j] > thresh else "black")
+
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
+
+    plt.savefig(filename)
 
 def dense(x, n1, n2, name):
     """
@@ -273,16 +309,20 @@ def gaussian_mixture(batch_size, n_dim=2, n_labels=10, x_var=0.5, y_var=0.1, lab
 
     return z
 
-def train_gaussian_mixture(n_gaussians, n_samples):
+def train_gaussian_mixture(n_gaussians, zdim, n_samples):
 
     # Generate vector for each centroid 
-    mu = np.identity(n_gaussians)
+    mu = np.identity(zdim)
+    mutemp = mu[range(0, zdim, 10)] #10x100
+    # idx = range(1, n_gaussians+1, 2)
+    idx = range(1, n_gaussians+1, 2)
+    mutemp[idx] *= -1
     # Generate random samples to train GMM
     for i in range(n_gaussians):
         if i % 2 == 0:
             continue
-        x_temp = np.vstack([np.random.randn(n_samples, n_gaussians) + mu[i-1],
-                            np.random.randn(n_samples, n_gaussians) + mu[i]])
+        x_temp = np.vstack([np.random.randn(n_samples, zdim) + mutemp[i-1],
+                            np.random.randn(n_samples, zdim) + mutemp[i]])
 
     gmm = mixture.GaussianMixture(n_components=n_gaussians, covariance_type='full')
     gmm.fit(x_temp)
@@ -389,14 +429,17 @@ def train(train_model=True):
     summary_op = tf.summary.merge_all()
 
     # Training Gaussian Mixture Model
-    gmm = train_gaussian_mixture(z_dim, 10000)
-    
+    gmm = train_gaussian_mixture(n_labels, z_dim, 10000)
+    # Confusion matrix params
+    gmm_labels = []
+    gmm_values = []
+    starting = 0
     # Saving the model
     saver = tf.train.Saver()
     step = 0
     with tf.Session() as sess:
         if train_model:
-            tensorboard_path, saved_model_path, log_path = form_results()
+            tensorboard_path, saved_model_path, log_path, other_results = form_results()
             sess.run(init)
             writer = tf.summary.FileWriter(logdir=tensorboard_path, graph=sess.graph)
             for i in range(n_epochs):
@@ -410,10 +453,15 @@ def train(train_model=True):
                     # z_real_dist = gaussian_mixture(batch_size, z_dim, label_indices=z_values)
 
                     # A mixture of 10 Guassians in R10
-                    z_real_dist = gmm.sample(n_samples=batch_size)[0]
-                    # print 'real dist ' + str(z_real_dist)
-                    # print 'shape ' + str(z_real_dist.shape)
-                    # time.sleep(10)
+                    gmm_samples = gmm.sample(n_samples=batch_size)
+                    z_real_dist = gmm_samples[0]
+                    if starting < 1:
+                        gmm_values = np.array(gmm_samples[0])
+                        gmm_labels = np.array(gmm_samples[1])
+                        starting+=1
+                    else:
+                        gmm_values = np.concatenate([gmm_values, gmm_samples[0]])
+                        gmm_labels = np.concatenate([gmm_labels, gmm_samples[1]])                    # print 'real dist ' + str(z_real_dist)
 
                     batch_x, batch_y = mnist.train.next_batch(batch_size)
                     sess.run(autoencoder_optimizer, feed_dict={x_input: batch_x, x_target: batch_x, y_input: batch_y})
@@ -438,6 +486,15 @@ def train(train_model=True):
                     step += 1
 
                 saver.save(sess, save_path=saved_model_path, global_step=step)
+
+            # Saving Confusion Matrix
+            gmm_predicted = gmm.predict(gmm_values)
+            # true, predicted, labels, sample weights
+            conf_values = confusion_matrix(gmm_labels, gmm_predicted)
+            confMtx_name = other_results + "/{0}.png".format(datetime.datetime.now())
+
+            save_confusion_matrix(n_labels, conf_values, confMtx_name, gmm_values.shape[0])
+
         else:
             # Get the latest results folder
             all_results = os.listdir(results_path)
